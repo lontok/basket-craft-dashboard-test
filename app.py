@@ -101,6 +101,27 @@ def daily_revenue_by_product() -> pd.DataFrame:
     return df
 
 
+ORDER_ITEMS_SQL = """
+SELECT
+  f.order_id,
+  p.product_name,
+  f.date_key
+FROM basket_craft.analytics.fct_order_items f
+JOIN basket_craft.analytics.dim_product p ON p.product_id = f.product_id
+"""
+
+
+@st.cache_data(ttl=600)
+def order_items() -> pd.DataFrame:
+    with get_connection().cursor() as cur:
+        cur.execute(ORDER_ITEMS_SQL)
+        cols = [c[0].lower() for c in cur.description]
+        rows = cur.fetchall()
+    df = pd.DataFrame(rows, columns=cols)
+    df["date_key"] = pd.to_datetime(df["date_key"])
+    return df
+
+
 def fmt_delta(curr: float, prior: float | None, kind: str) -> str | None:
     if prior is None or prior == 0:
         return None
@@ -221,4 +242,46 @@ else:
             ],
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
+
+st.divider()
+st.subheader("Bundle finder")
+
+items = order_items()
+all_products = sorted(items["product_name"].unique().tolist())
+anchor = st.selectbox("Find products bought with…", all_products)
+
+window = items[(items["date_key"].dt.date >= start) & (items["date_key"].dt.date <= end)]
+anchor_orders = window.loc[window["product_name"] == anchor, "order_id"].unique()
+
+if len(anchor_orders) == 0:
+    st.info(f"No orders containing **{anchor}** in the selected date range.")
+else:
+    bundles = (
+        window[(window["order_id"].isin(anchor_orders)) & (window["product_name"] != anchor)]
+        .groupby("product_name", as_index=False)["order_id"]
+        .nunique()
+        .rename(columns={"order_id": "co_orders"})
+        .sort_values("co_orders", ascending=False)
+        .head(10)
+    )
+
+    if bundles.empty:
+        st.info(f"**{anchor}** is never bought with another product in the selected range.")
+    else:
+        bundle_chart = (
+            alt.Chart(bundles)
+            .mark_bar()
+            .encode(
+                x=alt.X("co_orders:Q", title="Orders containing both"),
+                y=alt.Y("product_name:N", sort="-x", title=None),
+                tooltip=[
+                    alt.Tooltip("product_name:N", title="Bought with"),
+                    alt.Tooltip("co_orders:Q", title="Co-orders", format=","),
+                ],
+            )
+        )
+        st.altair_chart(bundle_chart, width="stretch")
+        st.caption(
+            f"{len(anchor_orders):,} orders contained **{anchor}** in the selected range."
+        )
